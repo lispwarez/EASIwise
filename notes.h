@@ -2,7 +2,7 @@
 
 Needed libraries
   https://arduinojson.org/
-  https://github.com/arduino-libraries/NTPClient
+  https://github.com/sstaub/NTP
   https://pubsubclient.knolleary.net/
 
 
