@@ -4,29 +4,25 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include <NTPClient.h>
 #include <FS.h>
+#include <NTP.h>
 
 // uncomment below for Serial debugging
 //#define SERIALDEBUG 115200
 
-// Set your timezone offset (in seconds) below; 3600 = 1 hour
-#define GMT_OFFSET 7200
-
-const char* ewgc_ssid = "EWGC_Geyser";
+const char* ewgc_ssid = "EWGC_Easiwise";
 const char* ewgc_pass = "12345678";
 
 const char* wifi_ssid = "your_wifi";
 const char* wifi_pass = "secretpassword";
 
 const char* mqtt_host = "192.168.1.50";
-const char* mqtt_user = "mqtt_user";
-const char* mqtt_pass = "mqtt_pass";
+const char* mqtt_user = "mqtt_username";
+const char* mqtt_pass = "mqtt_password";
 const int mqtt_port = 1883;
 
 
@@ -41,19 +37,20 @@ const int mqtt_port = 1883;
   #define Serialprintln(...)
 #endif
 
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, GMT_OFFSET);
+WiFiUDP wifiUDP;
+NTP ntp(wifiUDP);
 WiFiClient espClient;
 PubSubClient mqtt_client(espClient);
 ESP8266WebServer webserver(80);
-char device_fullmac[13], device_halfmac[7];
-char topic_lwt[25], topic_get[25], topic_info[25], topic_temp[25];
-unsigned long ewgc_next_check = 0, ewgc_offline_counter = 0, next_time_update = 0;
+JsonDocument json_ewgc;
+
 String ewgc_request_text;
 uint8_t ewgc_request_type = 0;
-JsonDocument json_ewgc;
-const char fw_compile_date[] = __DATE__ " " __TIME__;
+char device_fullmac[13];
+char topic_lwt[25], topic_get[25], topic_info[25], topic_temp[25];
+unsigned long ewgc_next_check = 0, ewgc_offline_counter = 0, ewgc_time_update = 600;
 bool waiting_for_time = true, got_ewgc_info = false;
+const char fw_compile_date[] = __DATE__ " " __TIME__;
 enum e_stages {NONE, EWGC_CONNECT, EWGC_CONNECTING, WIFI_CONNECT, WIFI_CONNECTING};
 e_stages stage = NONE;
 
@@ -62,7 +59,7 @@ void writeLog(String txt) {
   File file = SPIFFS.open("/log.txt", "a");
   if (file) {
     if (!waiting_for_time)
-      file.print("[" + getDateTime() + "] ");
+      file.print(ntp.formattedTime("[%F %T] "));
     file.println(txt);
     file.close();
   }
@@ -79,7 +76,7 @@ void setup() {
 #endif
 
   byte mac[6];
-  char wifi_host_name[12];
+  char wifi_host_name[12], device_halfmac[7];
   WiFi.macAddress(mac);
   sprintf(device_halfmac, "%.2x%.2x%.2x", mac[3], mac[4], mac[5]);
   sprintf(device_fullmac, "%.2x%.2x%.2x%.2x%.2x%.2x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -90,6 +87,7 @@ void setup() {
   sprintf(wifi_host_name, "ewgc_%s", device_halfmac);
 
   SPIFFS.begin();
+  if (SPIFFS.exists("/log.txt")) SPIFFS.remove("/log.txt");
   File file = SPIFFS.open("/log.txt","w");
   if (file) {
     file.printf("Firmware compiled: %s\n", fw_compile_date);
@@ -103,14 +101,17 @@ void setup() {
 
   WiFi.disconnect(true);
   WiFi.setAutoConnect(false);
-	WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(true);
   WiFi.hostname(wifi_host_name);
   WiFi.mode(WIFI_STA);
 
   mqtt_client.setCallback(mqtt_callback);
   mqtt_client.setServer(mqtt_host, mqtt_port);
 
-  timeClient.begin();
+  ntp.timeZone(2);
+  ntp.isDST(false);
+  ntp.begin();
+
   setupWebServer();
 }
 
@@ -195,17 +196,21 @@ void ewgcReadInfo() {
 
 
 void loop() {
+  bool seconds_changed = false;
   static wl_status_t last_wifi_status = WL_IDLE_STATUS;
-  static unsigned long wifi_timeout = 0, mqtt_reconnect_time = 0, ewgc_request_delay = 0;
+  static unsigned long seconds = 0, wifi_timeout = 0, mqtt_reconnect_time = 0, ewgc_request_delay = 0;
 
-  if (millis() > 864000000) ESP.restart(); // reboot after 10 days
+  if (millis() / 1000 > seconds) {
+    seconds = millis() / 1000;
+    seconds_changed = true;
+    if (seconds > 864000) ESP.restart(); // reboot after 10 days
 
-  if (millis() > ewgc_next_check) {
-    ewgc_next_check = millis() + 300000;
-    mqtt_client.disconnect();
-    WiFi.disconnect();
-    stage = EWGC_CONNECT;
-    delay(0);
+    if (seconds > ewgc_next_check) {
+      ewgc_next_check = seconds + 300;
+      mqtt_client.disconnect();
+      WiFi.disconnect();
+      stage = EWGC_CONNECT;
+    }
   }
 
   if (last_wifi_status != WiFi.status()) {
@@ -282,9 +287,9 @@ void loop() {
           ewgc_offline_counter++;
           writeLog("[WiFi] timeout connecting to " + String(ewgc_ssid) + " Failed attempts: " + String(ewgc_offline_counter));
           if (ewgc_offline_counter <= 5) {
-            ewgc_next_check = millis() + 120000;
+            ewgc_next_check = seconds + 120;
           } else {
-            ewgc_next_check = millis() + 600000;
+            ewgc_next_check = seconds + 600;
           }
           stage = WIFI_CONNECT;
         }
@@ -306,14 +311,27 @@ void loop() {
     }
   }
 
-  webserver.handleClient();
-  timeClient.update();
-  MDNS.update();
-
-  if (waiting_for_time && timeClient.isTimeSet()) {
-    waiting_for_time = false;
-    writeLog("Booted " + String(uint32_t(millis()/1000)) + " seconds ago");
+  if (seconds_changed) {
+    if (waiting_for_time) {
+      if (ntp.update()) {
+        waiting_for_time = false;
+        ntp.updateInterval(600000); // milliseconds
+        writeLog("Booted " + String(seconds) + " seconds ago");
+      }
+    } else {
+      ntp.update();
+      if (seconds > ewgc_time_update) {
+        ewgc_time_update = seconds + 86400; // 24 hours
+        char buff[64];
+        sprintf(buff, "setdt?DD=%d&MM=%d&YY=%d&hh=%d&mm=%d", ntp.day(), ntp.month(), ntp.year()-2000, ntp.hours(), ntp.minutes());
+        ewgc_request_text = String(buff);
+        ewgc_request_type = 1;
+        ewgc_next_check = 0;
+      }
+    }
   }
+  
+  webserver.handleClient();
 }
 
 
@@ -340,6 +358,10 @@ void mqtt_discovery() {
   sprintf(discovery_topic, "homeassistant/sensor/%s_temp/config", device_fullmac);
   mqtt_client.publish(discovery_topic, payload, true);
   delay(100);
+
+  device.remove("name");
+  device.remove("mdl");
+  device.remove("cu");
 
   sensor_tmax["uniq_id"] = String(device_fullmac) + "_tempmax";
   sensor_tmax["dev"] = device;
@@ -440,11 +462,9 @@ void mqtt_discovery() {
 
 
 void setupWebServer() {
-  MDNS.begin(WiFi.getHostname());
-
   webserver.on("/", HTTP_GET, []() {
     webserver.sendHeader("Connection", "close");
-    webserver.send(200, "text/html", "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body><a href='/log'>View Logs</a><br /><a href='/fw'>Upload Firmware</a></body></html>");
+    webserver.send(200, "text/html", "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body><div style='text-align:center'><input type='button' value='View Logs' onclick=\"location='/log'\" /><br /><br /><input type='button' value='Reboot' onclick=\"location='/reboot'\" /><br /><br /><input type='button' value='Upload Firmware' onclick=\"location='/fw'\" /></div></body></html>");
   });
   webserver.on("/log", HTTP_GET, []() {
     File file = SPIFFS.open("/log.txt", "r");
@@ -454,56 +474,44 @@ void setupWebServer() {
   });
   webserver.on("/reboot", HTTP_GET, []() {
     webserver.sendHeader("Connection", "close");
-    webserver.send(200, "text/html", "<!DOCTYPE html><html><head><meta http-equiv='refresh' content='20;URL=/'></head><body><div>Rebooting. Please wait...</div></body></html>");
+    webserver.send(200, "text/html", "<!DOCTYPE html><html><head><meta http-equiv='refresh' content='20;URL=/'></head><body><div style='text-align:center'>Rebooting. Please wait...</div></body></html>");
     delay(100);
     ESP.restart();
   });
   webserver.on("/fw", HTTP_GET, []() {
     webserver.sendHeader("Connection", "close");
-    webserver.send(200, "text/html", "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body><form method='POST' action='/fw' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Update'></form></body></html>");
+    webserver.send(200, "text/html", "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body><div style='text-align:center'><form method='POST' action='/fw' enctype='multipart/form-data'><input type='file' name='update'><input type='submit' value='Update'></form></div></body></html>");
   });
-  webserver.on(
-    "/fw", HTTP_POST, []() {
-      char txt[512];
-      sprintf(txt, "<!DOCTYPE html><html><head><meta http-equiv='refresh' content='20;URL=/'></head><body><div>Update result: %s<br />Rebooting. Please wait</div></body></html>", Update.hasError() ? "FAILED" : "SUCCESS");
-      webserver.sendHeader("Connection", "close");
-      webserver.send(200, "text/html", txt);
-      delay(100);
-      ESP.restart();
-    },
-    []() {
-      HTTPUpload& upload = webserver.upload();
-      if (upload.status == UPLOAD_FILE_START) {
+  webserver.on("/fw", HTTP_POST, []() {
+    char txt[512];
+    sprintf(txt, "<!DOCTYPE html><html><head><meta http-equiv='refresh' content='20;URL=/'></head><body><div style='text-align:center'>Update result: %s<br />Rebooting. Please wait</div></body></html>", Update.hasError() ? "FAILED" : "SUCCESS");
+    webserver.sendHeader("Connection", "close");
+    webserver.send(200, "text/html", txt);
+    delay(100);
+    ESP.restart();
+  },[]() {
+    HTTPUpload& upload = webserver.upload();
+    if (upload.status == UPLOAD_FILE_START) {
 #ifdef SERIALDEBUG
-        Serial.setDebugOutput(true);
+      Serial.setDebugOutput(true);
 #endif
-        WiFiUDP::stopAll();
-        Serialprintf("Update: %s\n", upload.filename.c_str());
-        uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-        if (!Update.begin(maxSketchSpace)) {  // start with max available size
-          Update.printError(Serial);
-        }
-      } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-          Update.printError(Serial);
-        }
-      } else if (upload.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) {  // true to set the size to the current progress
-          Serialprintf("Update Success: %u\nRebooting...\n", upload.totalSize);
-        }
+      WiFiUDP::stopAll();
+      Serialprintf("Update: %s\n", upload.filename.c_str());
+      uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+      if (!Update.begin(maxSketchSpace)) {  // start with max available size
+        Update.printError(Serial);
       }
-      yield();
-    });
-    webserver.begin();
-    MDNS.addService("http", "tcp", 80);
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) {  // true to set the size to the current progress
+        Serialprintf("Update Success: %u\nRebooting...\n", upload.totalSize);
+      }
+    }
+    yield();
+  });
+  webserver.begin();
 }
 
-
-String getDateTime() {
-  unsigned long rawTime = timeClient.getEpochTime();
-  struct tm *ptm = gmtime ((time_t *)&rawTime);
-  uint8_t h = (rawTime % 86400L) / 3600, m = (rawTime % 3600) / 60, s = (rawTime % 60);
-  char fulldate[20];
-  sprintf(fulldate, "%d-%02d-%02d %02d:%02d:%02d", ptm->tm_year+1900, ptm->tm_mon+1, ptm->tm_mday, h, m, s);
-  return String(fulldate);
-}
