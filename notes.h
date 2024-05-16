@@ -4,8 +4,12 @@ Needed libraries
   https://arduinojson.org/
   https://github.com/sstaub/NTP
   https://pubsubclient.knolleary.net/
+  
+Need to change MQTT_MAX_PACKET_SIZE to 512 in PubSubClient.h
 
 
+turns on if temp 9 degrees under timer temp
+turns off if 1 degree over timer temp
 
 GET:
   http://192.168.4.1/index
@@ -25,30 +29,30 @@ GET:
   http://192.168.4.1/holiday    toggles holiday mode
   
 POST: (GET seems to work too)
-  http://192.168.4.1/holdt?Ds="+l+"&Ys="+i.substring(2,4)+"&Ms="+r+"&hs="+n+"&ms="+s+"&De="+p+"&Ye="+x.substring(2,4)+"&Me="+h+"&he="+d+"&me="+j
+  http://192.168.4.1/holdt?Ys=24&Ms=1&Ds=1&hs=8&ms=0&Ye=24&Me=1&De=31&he=17&me=59
     set holiday timers
     
-  http://192.168.4.1/settimer?T1hn="+n+"&T1mn="+s+"&T1hf="+a+"&T1mf="+d+"&T2hn="+i+"&T2mn="+r+"&T2hf="+b+"&T2mf="+x+"&T3hn="+p+"&T3mn="+g+"&T3hf="+S+"&T3mf="+k+"&T4hn="+u+"&T4mn="+m+"&T4hf="+f+"&T4mf="+v
+  http://192.168.4.1/settimer?T1hn=4&T1mn=0&T1hf=6&T1mf=0&T2hn=15&T2mn=0&T2hf=17&T2mf=0&T3hn=4&T3mn=0&T3hf=6&T3mf=0&T4hn=15&T4mn=0&T4hf=17&T4mf=0
     sets the geyser times. T1 = weekday mornings, T2 = weekday evening, T3 weekend mornings, T4 weekend evenings
 
-  http://192.168.4.1/settemp?GBT=t
-  http://192.168.4.1/settimer?T1t=t&T2t=t&T3t=t&T4t=t
+  http://192.168.4.1/settemp?GBT=60
+  http://192.168.4.1/settimer?T1t=60&T2t=60&T3t=60&T4t=60
     set geyser max temperature. need to set in both places? (boost temp and timers temp) The app sets both
 
-  http://192.168.4.1/wifi?wapn=ssid&wpw=pass
+  http://192.168.4.1/wifi?wapn=EWGC_EasiWise&wpw=12345678
     set new WiFi SSID and password
 
-  http://192.168.4.1/setdt?DD="+l+"&MM="+r+"&YY="+c.substring(2,4)+"&hh="+t+"&mm="+o
+  http://192.168.4.1/setdt?YY=24&MM=6&DD=31&hh=13&mm=25
     set the system time/date
 
   http://192.168.4.1/save?ado={1 or 0}
     set Auto Drop Off
 
-  http://192.168.4.1/save?tar=value
+  http://192.168.4.1/save?tar=2.5
     set the electricity tarrif
 
   http://192.168.4.1/save?sse={1 or 0}
-    unknown ??
+    unknown ?? may be solar warnings
 
   http://192.168.4.1/integ?i0="+e+"&i1="+t+"&i2="+e+"&i3="+t
     unknown ??
